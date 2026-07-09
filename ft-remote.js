@@ -1,5 +1,5 @@
 (function () {
-  var version = "1.1.6";
+  var version = "1.1.7";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -45,6 +45,49 @@
     lastVerifiedAt: null,
     error: null
   };
+  var advertisementSelector = [
+    ".ad-slot",
+    ".o-ads-slot-wrapper",
+    ".o-ads",
+    "[data-o-ads-init]",
+    "[data-o-ads-name]",
+    "[data-o-ads-slot]",
+    ".native-ad-wrapper",
+    "pg-slot",
+    ".pg-slot",
+    ".sidebar-advert",
+    ".article__ad",
+    ".n-content-ad",
+    "iframe[title=\"Advertisement\"]",
+    "iframe[id^=\"google_ads_iframe_\"]"
+  ].join(",");
+  var advertisementContentSelector = [
+    ".o-ads",
+    "[data-o-ads-init]",
+    ".native-ad-wrapper",
+    "pg-slot",
+    ".pg-slot",
+    ".sidebar-advert",
+    ".article__ad",
+    ".n-content-ad"
+  ].join(",");
+  var advertisements = {
+    enabled: true,
+    styleInstalled: false,
+    observerSupported: Boolean(window.MutationObserver),
+    observerActive: false,
+    initialSweepComplete: false,
+    passes: 0,
+    mutationBatches: 0,
+    strippedSlots: 0,
+    removedElements: 0,
+    presentSlots: 0,
+    visibleSlots: 0,
+    correct: false,
+    lastStrippedAt: null,
+    lastVerifiedAt: null,
+    error: null
+  };
   var mock = {
     enabled: true,
     version: version,
@@ -58,6 +101,7 @@
     webUserLevel: null,
     bodyStateApplied: false,
     mockingbird: mockingbird,
+    advertisements: advertisements,
     installedAt: new Date().toISOString(),
     lastEmittedAt: null,
     lastNativeStateAt: null,
@@ -68,6 +112,8 @@
   var webpackRequire = null;
   var mockingbirdChunkRequested = false;
   var mockingbirdAppStarted = false;
+  var advertisementObserver = null;
+  var pendingAdvertisementSweepTimer = null;
   var stateSummary = {
     webStateApplied: false,
     webUserLevel: null,
@@ -75,6 +121,7 @@
     emissions: 0,
     nativeStateRewrites: 0,
     mockingbird: mockingbird,
+    advertisements: advertisements,
     verifiedAt: null
   };
   var loadStatus = {
@@ -116,6 +163,201 @@
       "user-ft-edit"
     );
     document.body.classList.add("user-signed-in", "user-subscribed");
+  }
+
+  function collectAdvertisementNodes(root, selector) {
+    var nodes = [];
+    var descendants;
+    var index;
+
+    if (!root) {
+      return nodes;
+    }
+    if (
+      root.nodeType === 1 &&
+      typeof root.matches === "function" &&
+      root.matches(selector)
+    ) {
+      nodes.push(root);
+    }
+    if (typeof root.querySelectorAll !== "function") {
+      return nodes;
+    }
+    descendants = root.querySelectorAll(selector);
+    for (index = 0; index < descendants.length; index += 1) {
+      if (nodes.indexOf(descendants[index]) === -1) {
+        nodes.push(descendants[index]);
+      }
+    }
+    return nodes;
+  }
+
+  function stripAdvertisements(root) {
+    var slots;
+    var contentSlots;
+    var child;
+    var index;
+    var visibleSlots = 0;
+    var strippedNow = 0;
+    var removedNow = 0;
+
+    try {
+      slots = collectAdvertisementNodes(root || document, advertisementSelector);
+      contentSlots = collectAdvertisementNodes(
+        root || document,
+        advertisementContentSelector
+      );
+
+      for (index = 0; index < slots.length; index += 1) {
+        if (!slots[index].hasAttribute("data-ft-remote-ad-stripped")) {
+          slots[index].setAttribute("data-ft-remote-ad-stripped", "true");
+          strippedNow += 1;
+        }
+      }
+
+      // Keep framework-owned slot shells for safe reconciliation, but remove
+      // the third-party creative contents. CSS below collapses the shells.
+      for (index = 0; index < contentSlots.length; index += 1) {
+        while (contentSlots[index].firstChild) {
+          child = contentSlots[index].firstChild;
+          contentSlots[index].removeChild(child);
+          removedNow += 1;
+        }
+      }
+
+      advertisements.passes += 1;
+      advertisements.strippedSlots += strippedNow;
+      advertisements.removedElements += removedNow;
+      advertisements.presentSlots = document.querySelectorAll(
+        advertisementSelector
+      ).length;
+      slots = collectAdvertisementNodes(document, advertisementSelector);
+      for (index = 0; index < slots.length; index += 1) {
+        if (
+          window.getComputedStyle &&
+          window.getComputedStyle(slots[index]).display !== "none"
+        ) {
+          visibleSlots += 1;
+        }
+      }
+      advertisements.visibleSlots = visibleSlots;
+      advertisements.correct = Boolean(
+        advertisements.styleInstalled &&
+        visibleSlots === 0
+      );
+      if (strippedNow || removedNow) {
+        advertisements.lastStrippedAt = new Date().toISOString();
+      }
+      advertisements.lastVerifiedAt = new Date().toISOString();
+      advertisements.error = null;
+    } catch (error) {
+      advertisements.error = String(error);
+    }
+  }
+
+  function scheduleAdvertisementSweep() {
+    if (pendingAdvertisementSweepTimer !== null) {
+      clearTimeout(pendingAdvertisementSweepTimer);
+    }
+    pendingAdvertisementSweepTimer = setTimeout(function () {
+      pendingAdvertisementSweepTimer = null;
+      stripAdvertisements(document);
+    }, 0);
+  }
+
+  function installAdvertisementStripper() {
+    var previous = window.__ftRemoteAdStripper;
+    var style = document.getElementById("ft-remote-ad-strip-style");
+    var lifecycleEvents = [
+      "app:ads:pageCreated",
+      "app:ads:pageVisible",
+      "oAds.allSlotsReady"
+    ];
+
+    if (previous && previous.observer) {
+      previous.observer.disconnect();
+    }
+    if (previous && previous.lifecycleHandler && previous.lifecycleEvents) {
+      previous.lifecycleEvents.forEach(function (eventName) {
+        document.removeEventListener(eventName, previous.lifecycleHandler);
+      });
+    }
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "ft-remote-ad-strip-style";
+      (document.head || document.documentElement).appendChild(style);
+    }
+    style.textContent = advertisementSelector + "{" + [
+      "display:none!important",
+      "visibility:hidden!important",
+      "height:0!important",
+      "min-height:0!important",
+      "max-height:0!important",
+      "margin:0!important",
+      "padding:0!important",
+      "border:0!important",
+      "overflow:hidden!important"
+    ].join(";") + "}";
+    advertisements.styleInstalled = true;
+    document.documentElement.setAttribute("data-ft-remote-ad-free", "true");
+
+    stripAdvertisements(document);
+    advertisements.initialSweepComplete = true;
+
+    if (window.MutationObserver) {
+      advertisementObserver = new window.MutationObserver(function (mutations) {
+        var shouldSweep = false;
+        var index;
+
+        advertisements.mutationBatches += 1;
+        for (index = 0; index < mutations.length; index += 1) {
+          if (
+            mutations[index].type === "attributes" ||
+            mutations[index].addedNodes.length
+          ) {
+            shouldSweep = true;
+            break;
+          }
+        }
+        if (shouldSweep) {
+          scheduleAdvertisementSweep();
+        }
+      });
+      advertisementObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: [
+          "class",
+          "id",
+          "title",
+          "data-o-ads-init",
+          "data-o-ads-name",
+          "data-o-ads-slot"
+        ]
+      });
+      advertisements.observerActive = true;
+    }
+
+    lifecycleEvents.forEach(function (eventName) {
+      document.addEventListener(eventName, scheduleAdvertisementSweep);
+    });
+    window.__ftRemoteAdStripper = {
+      version: version,
+      state: advertisements,
+      observer: advertisementObserver,
+      lifecycleEvents: lifecycleEvents,
+      lifecycleHandler: scheduleAdvertisementSweep,
+      sweep: function () {
+        stripAdvertisements(document);
+      },
+      stop: function () {
+        if (advertisementObserver) {
+          advertisementObserver.disconnect();
+          advertisements.observerActive = false;
+        }
+      }
+    };
   }
 
   function refreshMockDiagnostics() {
@@ -594,6 +836,7 @@
 
   installBridgeMock();
   armMockingbirdSynchronization();
+  installAdvertisementStripper();
   showLoadBanner();
 
   if (window.console && window.console.info) {
