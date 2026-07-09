@@ -1,5 +1,5 @@
 (function () {
-  var version = "1.1.3";
+  var version = "1.1.4";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -31,11 +31,26 @@
     mode: "subscribed",
     user: mockUser,
     bridgeHooked: false,
+    bridgeListeners: {},
     emissions: 0,
+    nativeStateRewrites: 0,
+    webStateApplied: false,
+    webUserLevel: null,
+    bodyStateApplied: false,
     installedAt: new Date().toISOString(),
-    lastEmittedAt: null
+    lastEmittedAt: null,
+    lastNativeStateAt: null,
+    lastVerifiedAt: null
   };
   var pendingEmitTimer = null;
+  var stateSummary = {
+    webStateApplied: false,
+    webUserLevel: null,
+    bodyStateApplied: false,
+    emissions: 0,
+    nativeStateRewrites: 0,
+    verifiedAt: null
+  };
   var loadStatus = {
     loaded: true,
     version: version,
@@ -43,11 +58,25 @@
     loadedAt: new Date().toISOString(),
     bannerShown: false,
     bannerShownAt: null,
+    state: stateSummary,
     subscriptionMock: mock
   };
 
   function copyMockUser() {
     return JSON.parse(JSON.stringify(mockUser));
+  }
+
+  function copyRegisteredUser() {
+    var user = copyMockUser();
+    user.level = "registered";
+    return user;
+  }
+
+  function copyNativeUser() {
+    return {
+      level: mockUser.level,
+      uuid: mockUser.uuid
+    };
   }
 
   function applySubscribedBodyState() {
@@ -63,20 +92,58 @@
     document.body.classList.add("user-signed-in", "user-subscribed");
   }
 
+  function refreshMockDiagnostics() {
+    var storedUser = null;
+
+    try {
+      storedUser = JSON.parse(window.localStorage.getItem("user") || "null");
+    } catch (error) {
+      mock.diagnosticError = String(error);
+    }
+
+    mock.webUserLevel = storedUser && storedUser.level || null;
+    mock.webStateApplied = Boolean(
+      storedUser &&
+      storedUser.level === "subscribed" &&
+      storedUser.uuid === mockUser.uuid
+    );
+    mock.bodyStateApplied = Boolean(
+      document.body &&
+      document.body.classList.contains("user-signed-in") &&
+      document.body.classList.contains("user-subscribed")
+    );
+    mock.lastVerifiedAt = new Date().toISOString();
+    stateSummary.webStateApplied = mock.webStateApplied;
+    stateSummary.webUserLevel = mock.webUserLevel;
+    stateSummary.bodyStateApplied = mock.bodyStateApplied;
+    stateSummary.emissions = mock.emissions;
+    stateSummary.nativeStateRewrites = mock.nativeStateRewrites;
+    stateSummary.verifiedAt = mock.lastVerifiedAt;
+  }
+
   function emitSubscribedState() {
     var bridge = window.ftAppWrapperBridge;
     if (!bridge || typeof bridge.receiveBridgeMessage !== "function") {
       return false;
     }
 
+    // The app's public bridge first seeds the web user, then promotes its
+    // level. The promotion runs the app's own userPermissionsChanged flow,
+    // which updates its store, body classes, navigation, and native shell.
     bridge.receiveBridgeMessage({
-      type: "userPermissionsChanged",
-      data: copyMockUser(),
+      type: "inAppBillingSubscriptionSuccess",
+      data: copyRegisteredUser(),
+      key: -1
+    });
+    bridge.receiveBridgeMessage({
+      type: "updateSubscription",
+      data: { newLevel: "subscribed" },
       key: -1
     });
     applySubscribedBodyState();
     mock.emissions += 1;
     mock.lastEmittedAt = new Date().toISOString();
+    setTimeout(refreshMockDiagnostics, 0);
 
     try {
       window.dispatchEvent(new CustomEvent("ft-remote-subscription-mock", {
@@ -152,39 +219,64 @@
       setTimeout(installBridgeMock, 50);
       return;
     }
-    if (bridge.__ftSubscribedTestMockInstalled) {
+    if (bridge.__ftSubscribedTestMockVersion === version) {
       mock.bridgeHooked = true;
       scheduleSubscribedState(0);
       return;
     }
 
-    var originalReceiveBridgeMessage = bridge.receiveBridgeMessage;
-    bridge.receiveBridgeMessage = function (message) {
+    var originalFire = bridge.fire;
+    bridge.fire = function (message) {
       var nextMessage = message;
       if (
         message &&
-        message.type === "userPermissionsChanged" &&
-        !(Number(message.key) >= 0)
+        message.name === "userstate"
       ) {
+        var originalUser = message.args && message.args[0];
         nextMessage = {
-          type: message.type,
-          data: copyMockUser(),
-          key: message.key
+          name: message.name,
+          args: [copyNativeUser()]
         };
+        mock.nativeStateRewrites += 1;
+        mock.lastNativeStateAt = new Date().toISOString();
+        stateSummary.nativeStateRewrites = mock.nativeStateRewrites;
+
+        if (
+          !originalUser ||
+          originalUser.level !== "subscribed" ||
+          !originalUser.uuid
+        ) {
+          scheduleSubscribedState(0);
+        }
       }
-      return originalReceiveBridgeMessage.call(bridge, nextMessage);
+      return originalFire.call(bridge, nextMessage);
     };
 
     var originalOn = bridge.on;
     bridge.on = function (type, callback) {
+      var listenersWereReady = Boolean(
+        mock.bridgeListeners.inAppBillingSubscriptionSuccess &&
+        mock.bridgeListeners.updateSubscription
+      );
       var result = originalOn.call(bridge, type, callback);
-      if (type === "userPermissionsChanged") {
+      if (
+        type === "inAppBillingSubscriptionSuccess" ||
+        type === "updateSubscription"
+      ) {
+        mock.bridgeListeners[type] = true;
+      }
+      if (
+        !listenersWereReady &&
+        mock.bridgeListeners.inAppBillingSubscriptionSuccess &&
+        mock.bridgeListeners.updateSubscription
+      ) {
         scheduleSubscribedState(0);
       }
       return result;
     };
 
     bridge.__ftSubscribedTestMockInstalled = true;
+    bridge.__ftSubscribedTestMockVersion = version;
     mock.bridgeHooked = true;
     setTimeout(emitSubscribedState, 0);
     setTimeout(emitSubscribedState, 500);
