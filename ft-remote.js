@@ -1,4 +1,5 @@
 (function () {
+  var version = "1.1.0";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -26,6 +27,7 @@
   };
   var mock = {
     enabled: true,
+    version: version,
     mode: "subscribed",
     user: mockUser,
     bridgeHooked: false,
@@ -34,6 +36,15 @@
     lastEmittedAt: null
   };
   var pendingEmitTimer = null;
+  var loadStatus = {
+    loaded: true,
+    version: version,
+    source: source,
+    loadedAt: new Date().toISOString(),
+    notificationSent: false,
+    notifiedAt: null,
+    subscriptionMock: mock
+  };
 
   function copyMockUser() {
     return JSON.parse(JSON.stringify(mockUser));
@@ -87,6 +98,27 @@
     }, delay);
   }
 
+  function notifyLoaded(bridge) {
+    if (
+      loadStatus.notificationSent ||
+      !bridge ||
+      typeof bridge.fire !== "function"
+    ) {
+      return;
+    }
+
+    try {
+      bridge.fire({
+        name: "toastNotify",
+        args: [{ message: "FT remote script v" + version + " loaded" }]
+      });
+      loadStatus.notificationSent = true;
+      loadStatus.notifiedAt = new Date().toISOString();
+    } catch (error) {
+      loadStatus.notificationError = String(error);
+    }
+  }
+
   function installBridgeMock() {
     var bridge = window.ftAppWrapperBridge;
     if (!bridge) {
@@ -95,6 +127,7 @@
     }
     if (bridge.__ftSubscribedTestMockInstalled) {
       mock.bridgeHooked = true;
+      notifyLoaded(bridge);
       scheduleSubscribedState(0);
       return;
     }
@@ -127,6 +160,7 @@
 
     bridge.__ftSubscribedTestMockInstalled = true;
     mock.bridgeHooked = true;
+    notifyLoaded(bridge);
     setTimeout(emitSubscribedState, 0);
     setTimeout(emitSubscribedState, 500);
     setTimeout(emitSubscribedState, 2000);
@@ -141,16 +175,34 @@
   }
 
   window.__ftRemoteSubscriptionMock = mock;
-  window.__ftRemoteGitHubScript = {
-    loaded: true,
-    source: source,
-    loadedAt: new Date().toISOString(),
-    subscriptionMock: mock
-  };
+  window.__ftRemoteGitHubScript = loadStatus;
+
+  try {
+    window.dispatchEvent(new CustomEvent("ft-remote-script-loaded", {
+      detail: loadStatus
+    }));
+  } catch (error) {
+    // The global status remains available in older web views.
+  }
+
+  try {
+    window.postMessage({
+      type: "ft-remote-script-loaded",
+      loaded: true,
+      version: version,
+      source: source,
+      loadedAt: loadStatus.loadedAt
+    }, "*");
+  } catch (error) {
+    // The custom event and global status are the primary test signals.
+  }
 
   installBridgeMock();
 
   if (window.console && window.console.info) {
-    window.console.info("[ft-remote-js] subscribed test state active", mock);
+    window.console.info(
+      "[ft-remote-js] loaded v" + version + "; subscribed test state active",
+      loadStatus
+    );
   }
 })();
