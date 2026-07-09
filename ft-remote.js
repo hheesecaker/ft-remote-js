@@ -1,5 +1,5 @@
 (function () {
-  var version = "1.1.5";
+  var version = "1.1.6";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -26,6 +26,7 @@
     }
   };
   var mockingbird = {
+    appStarted: false,
     runtimeCaptured: false,
     moduleFound: false,
     moduleId: null,
@@ -66,6 +67,7 @@
   var pendingMockingbirdTimer = null;
   var webpackRequire = null;
   var mockingbirdChunkRequested = false;
+  var mockingbirdAppStarted = false;
   var stateSummary = {
     webStateApplied: false,
     webUserLevel: null,
@@ -170,6 +172,17 @@
       document.body.classList.contains("user-signed-in") &&
       document.body.classList.contains("user-subscribed")
     );
+    if (
+      !mockingbirdAppStarted &&
+      mock.webStateApplied &&
+      document.body &&
+      !document.body.classList.contains("loading") &&
+      !document.body.classList.contains("loaderror") &&
+      !document.body.classList.contains("bootstraploading") &&
+      !document.body.classList.contains("structureloading")
+    ) {
+      markMockingbirdAppStarted();
+    }
     mock.lastVerifiedAt = new Date().toISOString();
     stateSummary.webStateApplied = mock.webStateApplied;
     stateSummary.webUserLevel = mock.webUserLevel;
@@ -208,6 +221,7 @@
         }
       } catch (error) {
         mockingbird.error = String(error);
+        return null;
       }
     }
 
@@ -291,6 +305,10 @@
     var chunks = window.webpackChunkft_app;
     var chunkId;
 
+    if (mockingbird.attempts >= 40) {
+      mockingbird.error = "Mockingbird module was not ready after 40 attempts";
+      return;
+    }
     mockingbird.attempts += 1;
     if (!chunks || typeof chunks.push !== "function") {
       scheduleMockingbirdSync(100);
@@ -330,6 +348,9 @@
   }
 
   function scheduleMockingbirdSync(delay) {
+    if (!mockingbirdAppStarted) {
+      return;
+    }
     if (pendingMockingbirdTimer !== null) {
       clearTimeout(pendingMockingbirdTimer);
     }
@@ -340,6 +361,41 @@
       }
       captureMockingbirdRuntime();
     }, delay);
+  }
+
+  function markMockingbirdAppStarted() {
+    if (mockingbirdAppStarted) {
+      return;
+    }
+    mockingbirdAppStarted = true;
+    mockingbird.appStarted = true;
+    scheduleMockingbirdSync(0);
+  }
+
+  function armMockingbirdSynchronization() {
+    if (
+      Number(window.debugStartupStage) >= 400 ||
+      (
+        window.webpackChunkft_app &&
+        document.body &&
+        !document.body.classList.contains("loading") &&
+        !document.body.classList.contains("loaderror") &&
+        !document.body.classList.contains("bootstraploading") &&
+        !document.body.classList.contains("structureloading")
+      )
+    ) {
+      markMockingbirdAppStarted();
+      return;
+    }
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", armMockingbirdSynchronization, {
+        once: true
+      });
+      return;
+    }
+    document.body.addEventListener("AppStarted", markMockingbirdAppStarted, {
+      once: true
+    });
   }
 
   function emitSubscribedState() {
@@ -537,7 +593,7 @@
   }
 
   installBridgeMock();
-  scheduleMockingbirdSync(0);
+  armMockingbirdSynchronization();
   showLoadBanner();
 
   if (window.console && window.console.info) {
