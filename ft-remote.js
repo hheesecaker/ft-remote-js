@@ -1,5 +1,5 @@
 (function () {
-  var version = "1.1.0";
+  var version = "1.1.1";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -41,6 +41,8 @@
     version: version,
     source: source,
     loadedAt: new Date().toISOString(),
+    bannerShown: false,
+    bannerShownAt: null,
     notificationSent: false,
     notifiedAt: null,
     subscriptionMock: mock
@@ -96,6 +98,60 @@
       pendingEmitTimer = null;
       emitSubscribedState();
     }, delay);
+  }
+
+  function showLoadBanner() {
+    var banner;
+    var existingBanner;
+
+    if (loadStatus.bannerShown) {
+      return;
+    }
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", showLoadBanner, {
+        once: true
+      });
+      return;
+    }
+
+    existingBanner = document.getElementById("ft-remote-load-status");
+    if (existingBanner && existingBanner.parentNode) {
+      existingBanner.parentNode.removeChild(existingBanner);
+    }
+
+    banner = document.createElement("div");
+    banner.id = "ft-remote-load-status";
+    banner.setAttribute("role", "status");
+    banner.setAttribute("aria-live", "polite");
+    banner.textContent = "FT remote script v" + version + " loaded";
+    banner.style.cssText = [
+      "position:fixed",
+      "z-index:2147483647",
+      "top:calc(env(safe-area-inset-top, 0px) + 12px)",
+      "left:16px",
+      "right:16px",
+      "max-width:360px",
+      "margin:0 auto",
+      "box-sizing:border-box",
+      "padding:10px 14px",
+      "border-radius:4px",
+      "background:#0f0f0f",
+      "color:#ffffff",
+      "box-shadow:0 3px 12px rgba(0, 0, 0, 0.28)",
+      "font:600 14px/20px -apple-system, BlinkMacSystemFont, sans-serif",
+      "letter-spacing:0",
+      "text-align:center",
+      "pointer-events:none"
+    ].join(";");
+    document.body.appendChild(banner);
+    loadStatus.bannerShown = true;
+    loadStatus.bannerShownAt = new Date().toISOString();
+
+    setTimeout(function () {
+      if (banner.parentNode) {
+        banner.parentNode.removeChild(banner);
+      }
+    }, 6000);
   }
 
   function notifyLoaded(bridge) {
@@ -197,6 +253,7 @@
     // The custom event and global status are the primary test signals.
   }
 
+  showLoadBanner();
   installBridgeMock();
 
   if (window.console && window.console.info) {
