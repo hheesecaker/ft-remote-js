@@ -1,5 +1,5 @@
 (function () {
-  var version = "1.1.4";
+  var version = "1.1.5";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -25,6 +25,25 @@
       marketing: false
     }
   };
+  var mockingbird = {
+    runtimeCaptured: false,
+    moduleFound: false,
+    moduleId: null,
+    synchronized: false,
+    attempts: 0,
+    countReset: false,
+    normalDecision: null,
+    normalPolicy: null,
+    premiumDecision: null,
+    premiumPolicy: null,
+    storagePresent: false,
+    storedCount: 0,
+    storedArticleCount: 0,
+    correct: false,
+    lastSynchronizedAt: null,
+    lastVerifiedAt: null,
+    error: null
+  };
   var mock = {
     enabled: true,
     version: version,
@@ -37,18 +56,23 @@
     webStateApplied: false,
     webUserLevel: null,
     bodyStateApplied: false,
+    mockingbird: mockingbird,
     installedAt: new Date().toISOString(),
     lastEmittedAt: null,
     lastNativeStateAt: null,
     lastVerifiedAt: null
   };
   var pendingEmitTimer = null;
+  var pendingMockingbirdTimer = null;
+  var webpackRequire = null;
+  var mockingbirdChunkRequested = false;
   var stateSummary = {
     webStateApplied: false,
     webUserLevel: null,
     bodyStateApplied: false,
     emissions: 0,
     nativeStateRewrites: 0,
+    mockingbird: mockingbird,
     verifiedAt: null
   };
   var loadStatus = {
@@ -94,12 +118,46 @@
 
   function refreshMockDiagnostics() {
     var storedUser = null;
+    var storedMeter = null;
+    var userMeter = null;
 
     try {
       storedUser = JSON.parse(window.localStorage.getItem("user") || "null");
     } catch (error) {
       mock.diagnosticError = String(error);
     }
+
+    try {
+      storedMeter = JSON.parse(
+        window.localStorage.getItem("mockingbird") || "null"
+      );
+    } catch (error) {
+      mockingbird.error = String(error);
+    }
+
+    if (
+      storedMeter &&
+      storedMeter.tracking &&
+      storedMeter.tracking[mockUser.uuid]
+    ) {
+      userMeter = storedMeter.tracking[mockUser.uuid];
+    }
+
+    mockingbird.storagePresent = Boolean(storedMeter);
+    mockingbird.storedCount = Number(userMeter && userMeter.count) || 0;
+    mockingbird.storedArticleCount = Object.keys(
+      userMeter && userMeter.l || {}
+    ).length;
+    mockingbird.correct = Boolean(
+      mockingbird.synchronized &&
+      mockingbird.normalDecision === true &&
+      mockingbird.normalPolicy === "SUBSCRIPTION_POLICY" &&
+      mockingbird.premiumDecision === false &&
+      mockingbird.premiumPolicy === "DENY_POLICY" &&
+      mockingbird.storedCount === 0 &&
+      mockingbird.storedArticleCount === 0
+    );
+    mockingbird.lastVerifiedAt = new Date().toISOString();
 
     mock.webUserLevel = storedUser && storedUser.level || null;
     mock.webStateApplied = Boolean(
@@ -119,6 +177,169 @@
     stateSummary.emissions = mock.emissions;
     stateSummary.nativeStateRewrites = mock.nativeStateRewrites;
     stateSummary.verifiedAt = mock.lastVerifiedAt;
+  }
+
+  function isMockingbirdModule(candidate) {
+    return Boolean(
+      candidate &&
+      typeof candidate.init === "function" &&
+      typeof candidate.shouldShow === "function" &&
+      typeof candidate.setOverrideLevel === "function" &&
+      typeof candidate.resetCount === "function"
+    );
+  }
+
+  function findMockingbirdModule(requireModule) {
+    var candidate;
+    var factorySource;
+    var moduleIds;
+    var moduleId;
+    var index;
+
+    if (!requireModule || !requireModule.m) {
+      return null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(requireModule.m, "34014")) {
+      try {
+        candidate = requireModule(34014);
+        if (isMockingbirdModule(candidate)) {
+          return { id: "34014", value: candidate };
+        }
+      } catch (error) {
+        mockingbird.error = String(error);
+      }
+    }
+
+    moduleIds = Object.keys(requireModule.m);
+    for (index = 0; index < moduleIds.length; index += 1) {
+      moduleId = moduleIds[index];
+      try {
+        factorySource = String(requireModule.m[moduleId]);
+      } catch (error) {
+        continue;
+      }
+      if (
+        factorySource.indexOf("mockingbirdOverrideLevelChanged") === -1 ||
+        factorySource.indexOf("PAYWALL_DISABLED") === -1
+      ) {
+        continue;
+      }
+      try {
+        candidate = requireModule(moduleId);
+        if (isMockingbirdModule(candidate)) {
+          return { id: String(moduleId), value: candidate };
+        }
+      } catch (error) {
+        mockingbird.error = String(error);
+      }
+    }
+
+    return null;
+  }
+
+  function synchronizeMockingbird(requireModule) {
+    var found = findMockingbirdModule(requireModule);
+    var meter;
+    var normalResult;
+    var premiumResult;
+
+    if (!found) {
+      return false;
+    }
+
+    meter = found.value;
+    try {
+      meter.init();
+      // Mockingbird has a separate in-memory override. Clear it so access is
+      // driven by the real subscribed user store, then clear only this test
+      // user's counted reads. Do not change limits or elevate to Premium.
+      meter.setOverrideLevel(false);
+      meter.resetCount(mockUser.uuid);
+      normalResult = meter.shouldShow({
+        id: "ft-remote-mockingbird-normal-probe",
+        protectionlevel: "normal"
+      });
+      premiumResult = meter.shouldShow({
+        id: "ft-remote-mockingbird-premium-probe",
+        protectionlevel: "premium"
+      });
+
+      mockingbird.moduleFound = true;
+      mockingbird.moduleId = found.id;
+      mockingbird.synchronized = true;
+      mockingbird.countReset = true;
+      mockingbird.normalDecision = Boolean(
+        normalResult && normalResult.decision
+      );
+      mockingbird.normalPolicy = normalResult && normalResult.policy || null;
+      mockingbird.premiumDecision = Boolean(
+        premiumResult && premiumResult.decision
+      );
+      mockingbird.premiumPolicy = premiumResult && premiumResult.policy || null;
+      mockingbird.lastSynchronizedAt = new Date().toISOString();
+      mockingbird.error = null;
+      setTimeout(refreshMockDiagnostics, 0);
+      return true;
+    } catch (error) {
+      mockingbird.error = String(error);
+      return false;
+    }
+  }
+
+  function captureMockingbirdRuntime() {
+    var chunks = window.webpackChunkft_app;
+    var chunkId;
+
+    mockingbird.attempts += 1;
+    if (!chunks || typeof chunks.push !== "function") {
+      scheduleMockingbirdSync(100);
+      return;
+    }
+
+    chunkId = "ft-remote-mockingbird-" + version + "-" + mockingbird.attempts;
+    try {
+      chunks.push([[chunkId], {}, function (requireModule) {
+        webpackRequire = requireModule;
+        mockingbird.runtimeCaptured = true;
+
+        if (synchronizeMockingbird(requireModule)) {
+          return;
+        }
+        if (
+          !mockingbirdChunkRequested &&
+          typeof requireModule.e === "function"
+        ) {
+          mockingbirdChunkRequested = true;
+          Promise.resolve(requireModule.e(875)).then(function () {
+            if (!synchronizeMockingbird(requireModule)) {
+              scheduleMockingbirdSync(100);
+            }
+          }).catch(function (error) {
+            mockingbird.error = String(error);
+            scheduleMockingbirdSync(250);
+          });
+          return;
+        }
+        scheduleMockingbirdSync(100);
+      }]);
+    } catch (error) {
+      mockingbird.error = String(error);
+      scheduleMockingbirdSync(250);
+    }
+  }
+
+  function scheduleMockingbirdSync(delay) {
+    if (pendingMockingbirdTimer !== null) {
+      clearTimeout(pendingMockingbirdTimer);
+    }
+    pendingMockingbirdTimer = setTimeout(function () {
+      pendingMockingbirdTimer = null;
+      if (webpackRequire && synchronizeMockingbird(webpackRequire)) {
+        return;
+      }
+      captureMockingbirdRuntime();
+    }, delay);
   }
 
   function emitSubscribedState() {
@@ -143,6 +364,7 @@
     applySubscribedBodyState();
     mock.emissions += 1;
     mock.lastEmittedAt = new Date().toISOString();
+    scheduleMockingbirdSync(0);
     setTimeout(refreshMockDiagnostics, 0);
 
     try {
@@ -315,6 +537,7 @@
   }
 
   installBridgeMock();
+  scheduleMockingbirdSync(0);
   showLoadBanner();
 
   if (window.console && window.console.info) {
