@@ -1,5 +1,5 @@
 (function () {
-  var version = "1.1.2";
+  var version = "1.1.3";
   var source = "https://raw.githubusercontent.com/hheesecaker/ft-remote-js/main/ft-remote.js";
   var mockUser = {
     level: "subscribed",
@@ -41,8 +41,8 @@
     version: version,
     source: source,
     loadedAt: new Date().toISOString(),
-    alertShown: false,
-    alertedAt: null,
+    bannerShown: false,
+    bannerShownAt: null,
     subscriptionMock: mock
   };
 
@@ -98,41 +98,52 @@
     }, delay);
   }
 
-  function showLoadAlert() {
-    var storageKey = "ft-remote-load-alert-version";
+  function showLoadBanner() {
+    var banner;
 
-    try {
-      if (
-        window.sessionStorage &&
-        window.sessionStorage.getItem(storageKey) === version
-      ) {
-        return;
-      }
-      if (window.sessionStorage) {
-        window.sessionStorage.setItem(storageKey, version);
-      }
-    } catch (error) {
-      // A page-level marker below still prevents duplicate alerts.
-    }
-
-    if (window.__ftRemoteLoadAlertVersion === version) {
+    if (loadStatus.bannerShown) {
       return;
     }
-    window.__ftRemoteLoadAlertVersion = version;
-
-    if (typeof window.alert !== "function") {
-      loadStatus.alertError = "window.alert is unavailable";
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", showLoadBanner, {
+        once: true
+      });
       return;
     }
 
-    loadStatus.alertShown = true;
-    loadStatus.alertedAt = new Date().toISOString();
-    try {
-      window.alert("FT remote script v" + version + " loaded successfully");
-    } catch (error) {
-      loadStatus.alertShown = false;
-      loadStatus.alertError = String(error);
-    }
+    banner = document.createElement("div");
+    banner.id = "ft-remote-load-status";
+    banner.setAttribute("role", "status");
+    banner.setAttribute("aria-live", "polite");
+    banner.textContent = "FT remote script v" + version + " loaded successfully";
+    banner.style.cssText = [
+      "position:fixed",
+      "z-index:2147483647",
+      "top:calc(env(safe-area-inset-top, 0px) + 12px)",
+      "left:16px",
+      "right:16px",
+      "max-width:420px",
+      "margin:0 auto",
+      "box-sizing:border-box",
+      "padding:10px 14px",
+      "border-radius:4px",
+      "background:#0f0f0f",
+      "color:#ffffff",
+      "box-shadow:0 3px 12px rgba(0, 0, 0, 0.28)",
+      "font:600 14px/20px -apple-system, BlinkMacSystemFont, sans-serif",
+      "letter-spacing:0",
+      "text-align:center",
+      "pointer-events:none"
+    ].join(";");
+    document.body.appendChild(banner);
+    loadStatus.bannerShown = true;
+    loadStatus.bannerShownAt = new Date().toISOString();
+
+    setTimeout(function () {
+      if (banner.parentNode) {
+        banner.parentNode.removeChild(banner);
+      }
+    }, 30000);
   }
 
   function installBridgeMock() {
@@ -212,7 +223,7 @@
   }
 
   installBridgeMock();
-  setTimeout(showLoadAlert, 0);
+  showLoadBanner();
 
   if (window.console && window.console.info) {
     window.console.info(
